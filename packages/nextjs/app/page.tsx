@@ -91,20 +91,30 @@ const Home: NextPage = () => {
   // ERC20 approve via wagmi directly
   const { writeContractAsync: writeApprove } = useWriteContract();
 
-  // ============ Timer Countdown ============
+  // ============ Timer Countdown (real-time) ============
   useEffect(() => {
     if (timeRemaining === undefined) {
       setTimeLeft("--:--");
       return;
     }
-    const seconds = Number(timeRemaining);
-    if (seconds <= 0) {
-      setTimeLeft("00:00");
-      return;
-    }
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    setTimeLeft(`${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`);
+    let seconds = Number(timeRemaining);
+    const formatTime = (s: number) => {
+      if (s <= 0) return "00:00";
+      const mins = Math.floor(s / 60);
+      const secs = s % 60;
+      return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
+    };
+    setTimeLeft(formatTime(seconds));
+    const interval = setInterval(() => {
+      seconds--;
+      if (seconds <= 0) {
+        setTimeLeft("00:00");
+        clearInterval(interval);
+      } else {
+        setTimeLeft(formatTime(seconds));
+      }
+    }, 1000);
+    return () => clearInterval(interval);
   }, [timeRemaining]);
 
   // ============ Helpers ============

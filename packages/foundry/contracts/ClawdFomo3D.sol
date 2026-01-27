@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /**
  * @title ClawdFomo3D
@@ -10,6 +11,8 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
  *         Burns $CLAWD on every buy and at round end for deflationary pressure.
  */
 contract ClawdFomo3D is ReentrancyGuard {
+    using SafeERC20 for IERC20;
+
     // ============ Constants ============
     uint256 public constant BURN_ON_BUY_BPS = 1000;       // 10% burned on every buy
     uint256 public constant WINNER_BPS = 4000;              // 40% of pot to winner
@@ -52,6 +55,7 @@ contract ClawdFomo3D is ReentrancyGuard {
 
     mapping(uint256 => mapping(address => Player)) public players; // round => player
     mapping(uint256 => RoundResult) public roundResults;
+    mapping(uint256 => uint256) public roundPointsPerKey; // snapshot of pointsPerKey when round ends
 
     struct RoundResult {
         address winner;
@@ -92,13 +96,13 @@ contract ClawdFomo3D is ReentrancyGuard {
         require(cost > 0, "Cost must be > 0");
 
         // Transfer CLAWD from buyer
-        require(clawd.transferFrom(msg.sender, address(this), cost), "Transfer failed");
+        clawd.safeTransferFrom(msg.sender, address(this), cost);
 
         // Burn 10% immediately
         uint256 burnAmount = (cost * BURN_ON_BUY_BPS) / BPS;
         uint256 toPot = cost - burnAmount;
 
-        clawd.transfer(DEAD, burnAmount);
+        clawd.safeTransfer(DEAD, burnAmount);
         totalBurned += burnAmount;
 
         // Add to pot
@@ -141,10 +145,10 @@ contract ClawdFomo3D is ReentrancyGuard {
         uint256 devPayout = potSize - winnerPayout - burnPayout - dividendPayout; // remainder to dev
 
         // Pay winner
-        clawd.transfer(lastBuyer, winnerPayout);
+        clawd.safeTransfer(lastBuyer, winnerPayout);
 
         // Burn
-        clawd.transfer(DEAD, burnPayout);
+        clawd.safeTransfer(DEAD, burnPayout);
         totalBurned += burnPayout;
 
         // Distribute dividends via points-per-key
@@ -153,7 +157,10 @@ contract ClawdFomo3D is ReentrancyGuard {
         }
 
         // Dev fee
-        clawd.transfer(dev, devPayout);
+        clawd.safeTransfer(dev, devPayout);
+
+        // Snapshot pointsPerKey for this round so dividends can be claimed later
+        roundPointsPerKey[currentRound] = pointsPerKey;
 
         // Record result
         roundResults[currentRound] = RoundResult({
@@ -170,8 +177,6 @@ contract ClawdFomo3D is ReentrancyGuard {
         currentRound++;
         roundStart = block.timestamp;
         roundEnd = block.timestamp + timerDuration;
-        // Reset per-round state (keys/points carry over for dividend claims)
-        // New round starts with fresh pot, totalKeys, lastBuyer
         totalKeys = 0;
         lastBuyer = address(0);
         pointsPerKey = 0;
@@ -183,12 +188,12 @@ contract ClawdFomo3D is ReentrancyGuard {
      * @notice Claim accumulated dividends for a specific round.
      */
     function claimDividends(uint256 round) external nonReentrant {
-        Player storage p = players[round][msg.sender];
         uint256 owed = _dividendsOf(round, msg.sender);
         require(owed > 0, "No dividends");
 
+        Player storage p = players[round][msg.sender];
         p.withdrawnDividends += owed;
-        clawd.transfer(msg.sender, owed);
+        clawd.safeTransfer(msg.sender, owed);
 
         emit DividendsClaimed(round, msg.sender, owed);
     }
@@ -219,7 +224,9 @@ contract ClawdFomo3D is ReentrancyGuard {
 
     function _dividendsOf(uint256 round, address player) internal view returns (uint256) {
         Player storage p = players[round][player];
-        int256 accumulated = int256(pointsPerKey * p.keys) + p.pointsCorrection;
+        // Use snapshot for completed rounds, live value for current round
+        uint256 ppk = round < currentRound ? roundPointsPerKey[round] : pointsPerKey;
+        int256 accumulated = int256(ppk * p.keys) + p.pointsCorrection;
         if (accumulated < 0) return 0;
         uint256 total = uint256(accumulated) / MAGNITUDE;
         return total - p.withdrawnDividends;
